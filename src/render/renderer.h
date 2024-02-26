@@ -13,8 +13,11 @@
 #include <memory>
 #include <tuple>
 #include <vector>
+#include <optional>
 
 namespace render {
+
+enum OutOfBoundsStrategy { ZERO, NEAREST_NEIGHBOUR };
 
 union Bounds {
     struct {
@@ -49,6 +52,9 @@ protected:
 
     template <typename T>
     static T fastExponentiation(T base, uint32_t power);
+    inline static float rgbaToGreyscale(const glm::vec4 &rgba);
+    std::optional<std::reference_wrapper<const glm::vec4>> getColor(
+        const std::vector<glm::vec4> &oldFrameBuffer, int x, int y, OutOfBoundsStrategy strat = ZERO);
 
     static glm::vec3 computePhongShading(const glm::vec3& color, const volume::GradientVoxel& gradient,
                                          const glm::vec3& lightDirection, const glm::vec3& viewDirection,
@@ -56,6 +62,18 @@ protected:
                                          const glm::vec3& kD = glm::vec3(0.7f),
                                          const glm::vec3& kS = glm::vec3(0.2f),
                                          uint32_t specularPower = 100U);
+    glm::vec3 computeGoochShading(const glm::vec3& color, const volume::GradientVoxel& gradient,
+                                  const glm::vec3& lightDirection, const glm::vec3& viewDirection,
+                                  const glm::vec3& kA = glm::vec3(0.1f),
+                                  const glm::vec3& kD = glm::vec3(0.7f),
+                                  const glm::vec3& kS = glm::vec3(0.2f),
+                                  uint32_t specularPower = 100U) const;
+    glm::vec3 computeShading(const glm::vec3& color, const volume::GradientVoxel& gradient,
+                             const glm::vec3& lightDirection, const glm::vec3& viewDirection,
+                             const glm::vec3& kA = glm::vec3(0.1f),
+                             const glm::vec3& kD = glm::vec3(0.7f),
+                             const glm::vec3& kS = glm::vec3(0.2f),
+                             uint32_t specularPower = 100U) const;
 
 private:
     void resizeImage(const glm::ivec2& resolution);

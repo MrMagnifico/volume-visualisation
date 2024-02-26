@@ -9,6 +9,8 @@
 #include <tbb/blocked_range2d.h>
 #include <tbb/parallel_for.h>
 #include <tuple>
+#include <stdexcept>
+#include <cmath>
 
 namespace render {
 
@@ -133,6 +135,52 @@ void Renderer::render()
             }
         }
 #endif
+
+    // Edge detection
+    if (m_config.edgeDetection) {
+        float xSobelCoeffs[]    { -1.0f, 0.0f, 1.0f, -2.0f, 0.0f, 2.0f, -1.0f, 0.0f, 1.0f };
+        float ySobelCoeffs[]    { -1.0f, -2.0f, -1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 2.0f, 1.0f };
+        std::vector<glm::vec4> oldFrameBuffer = m_frameBuffer;
+
+        #if PARALLELISM == 0
+    // Regular (single threaded) for loops.
+    for (int x = 0; x < m_config.renderResolution.x; x++) {
+        for (int y = 0; y < m_config.renderResolution.y; y++) {
+#else
+    // Parallel for loop (in 2 dimensions) that subdivides the screen into tiles.
+        tbb::parallel_for(screenRange, [&](tbb::blocked_range2d<int> localRange) {
+        // Loop over the pixels in a tile. This function is called on multiple threads at the same time.
+        for (int32_t y = std::begin(localRange.rows()); y != std::end(localRange.rows()); y++) {
+            for (int32_t x = std::begin(localRange.cols()); x != std::end(localRange.cols()); x++) {
+#endif
+            // Compute x gradient and y gradient
+            float gradientX             = 0.0f;
+            float gradientY             = 0.0f;
+            uint8_t sobelCoeffCounter   = 0U;
+            for (int32_t dy = y - 1; dy <= y + 1; dy++) {
+                for (int32_t dx = x - 1; dx <= x + 1; dx++, sobelCoeffCounter++) {
+                    auto maybeColor = getColor(oldFrameBuffer, dx, dy, ZERO);
+                    if (!maybeColor.has_value()) { continue; }
+
+                    float greyscale = rgbaToGreyscale(maybeColor.value());
+                    gradientX += greyscale * xSobelCoeffs[sobelCoeffCounter];
+                    gradientY += greyscale * ySobelCoeffs[sobelCoeffCounter];
+                }
+            }
+
+            // Compute final gradient and test against threshold
+            float gradient = std::sqrt((gradientX * gradientX) + (gradientY * gradientY));
+            if (gradient > m_config.edgeThreshold) { fillColor(x, y, m_config.edgeColor); }
+
+#if PARALLELISM == 1
+        }
+    }
+});
+#else
+            }
+        }
+#endif
+    }
 }
 
 // ======= DO NOT MODIFY THIS FUNCTION ========
@@ -175,8 +223,6 @@ glm::vec4 Renderer::traceRayMIP(const Ray& ray, float sampleStep) const
 // Use the bisectionAccuracy function (to be implemented) to get a more precise isosurface location between two steps.
 glm::vec4 Renderer::traceRayISO(const Ray& ray, float sampleStep) const
 {
-    static constexpr glm::vec3 isoColor { 0.8f, 0.8f, 0.2f };
-
     glm::vec3 samplePos = ray.origin + ray.tmin * ray.direction;
     const glm::vec3 increment = sampleStep * ray.direction;
     for (float t = ray.tmin; t <= ray.tmax; t += sampleStep, samplePos += increment) {
@@ -187,12 +233,28 @@ glm::vec4 Renderer::traceRayISO(const Ray& ray, float sampleStep) const
             glm::vec3 finalPos  = ray.origin + (refinedT * ray.direction);
 
             // Compute final colour value
-            if (m_config.volumeShading) {
+            if (m_config.shadingMode == ShadingMode::ShadingNone) { return glm::vec4(m_config.isoColor, 1.0f); }
+            else { 
                 const volume::GradientVoxel &localGradient  = m_pGradientVolume->getGradientInterpolate(finalPos);
                 glm::vec3 viewDirection                     = finalPos - m_pCamera->position();
-                glm::vec3 phongRes                          = computePhongShading(isoColor, localGradient, viewDirection, viewDirection);
-                return glm::vec4(phongRes, 1.0f);
-            } else { return glm::vec4(isoColor, 1.0f); }
+                glm::vec3 finalColor                        = glm::vec3(0.0f);
+
+                // Accumulate lighting from all sources
+                glm::vec3 lightDirection;
+                for (size_t lightIdx = 0; lightIdx < m_config.numLights; lightIdx++) {
+                    const PointLight &light =   *(m_config.sceneLights[lightIdx]);
+                    lightDirection          =   finalPos - light.pos;
+                    finalColor              +=  computeShading(m_config.isoColor, localGradient, lightDirection, viewDirection,
+                                                               light.val, light.val, light.val);
+                }
+
+                // Add camera light if enabled
+                if (m_config.includeCameraLight) { finalColor += computeShading(m_config.isoColor, localGradient, viewDirection, viewDirection); }
+
+                // Clamp and return
+                finalColor = glm::clamp(finalColor, glm::vec3(0.0f), glm::vec3(1.0f));
+                return glm::vec4(finalColor, 1.0f);
+            }
         }
     }
 
@@ -235,6 +297,8 @@ T Renderer::fastExponentiation(T base, uint32_t power) {
     return res;
 }
 
+inline float Renderer::rgbaToGreyscale(const glm::vec4 &rgba) { return (0.3f * rgba.r) + (0.59f * rgba.g) + (0.11f * rgba.b); }
+
 // ======= TODO: IMPLEMENT ========
 // Compute Phong Shading given the voxel color (material color), the gradient, the light vector and view vector.
 // You can find out more about the Phong shading model at:
@@ -264,6 +328,51 @@ glm::vec3 Renderer::computePhongShading(const glm::vec3& color, const volume::Gr
     return ambient + diffuse + specular;
 }
 
+glm::vec3 Renderer::computeGoochShading(const glm::vec3& color, const volume::GradientVoxel& gradient,
+                                        const glm::vec3& lightDirection, const glm::vec3& viewDirection,
+                                        const glm::vec3& kA, const glm::vec3& kD,
+                                        const glm::vec3& kS, uint32_t specularPower) const {
+    // Construct equation terms
+    glm::vec3 kBlue     = glm::vec3(0.0f, 0.0f, m_config.blueCoeff);
+    glm::vec3 kYellow   = glm::vec3(m_config.yellowCoeff, m_config.yellowCoeff, 0.0f);
+    glm::vec3 kCool     = kBlue + (m_config.coolDiffuseCoeff * color);
+    glm::vec3 kWarm     = kYellow + (m_config.warmDiffuseCoeff * color);
+
+    // Normalise the given vectors
+    glm::vec3 normL     = glm::normalize(lightDirection);
+    glm::vec3 normN     = gradient.dir / gradient.magnitude;
+    float diffuseDot    = glm::dot(normL, normN);
+    glm::vec3 normV     = glm::normalize(viewDirection);
+    glm::vec3 normR     = 2.0f * diffuseDot * normN - normL;
+
+    // Compute Gooch diffuse and Phong specular (account for negative values in Phong specular ONLY) 
+    glm::vec3 diffuse   = ((1.0f + diffuseDot) / 2.0f) * kCool +
+                          (1.0f - ((1.0f + diffuseDot) / 2)) * kWarm;
+    diffuse            *= kD;
+    float specularDot   = glm::dot(normR, normV);
+    glm::vec3 specular  = (diffuseDot > 0.0f && specularDot > 0.0f)         ?
+                          kS * fastExponentiation(specularDot, specularPower) * color :
+                          glm::vec3(0.0f);
+
+    return diffuse + specular;
+}
+
+glm::vec3 Renderer::computeShading(const glm::vec3& color, const volume::GradientVoxel& gradient,
+                                   const glm::vec3& lightDirection, const glm::vec3& viewDirection,
+                                   const glm::vec3& kA, const glm::vec3& kD,
+                                   const glm::vec3& kS, uint32_t specularPower) const {
+    switch (m_config.shadingMode) {
+        case ShadingMode::ShadingNone:
+            return color;
+        case ShadingMode::ShadingPhong:
+            return computePhongShading(color, gradient, lightDirection, viewDirection, kA, kD, kS, specularPower);
+        case ShadingMode::ShadingGooch:
+            return computeGoochShading(color, gradient, lightDirection, viewDirection, kA, kD, kS, specularPower);
+        default:
+            throw std::invalid_argument("Shading enum does not match any registered values");
+    }
+}
+
 // ======= TODO: IMPLEMENT ========
 // In this function, implement 1D transfer function raycasting.
 // Use getTFValue to compute the color for a given volume value according to the 1D transfer function.
@@ -280,14 +389,27 @@ glm::vec4 Renderer::traceRayComposite(const Ray& ray, float sampleStep) const {
         float retAlpha  = TFVal.a;
         TFVal.a         = 1.0f;
         
-        // Phong shading for each sample point
-        if (m_config.volumeShading) {
-                glm::vec3 intrmCol(TFVal);
-                const volume::GradientVoxel &localGradient  = m_pGradientVolume->getGradientInterpolate(samplePos);
-                glm::vec3 viewDirection                     = samplePos - m_pCamera->position();
-                glm::vec3 phongRes                          = computePhongShading(intrmCol, localGradient, viewDirection, viewDirection);
-                TFVal                                       = glm::vec4(phongRes, 1.0f);
-        } 
+        // Shading for each sample point
+        if (m_config.shadingMode != ShadingMode::ShadingNone) { 
+            const volume::GradientVoxel &localGradient  = m_pGradientVolume->getGradientInterpolate(samplePos);
+            glm::vec3 viewDirection                     = samplePos - m_pCamera->position();
+            glm::vec3 finalColor                        = glm::vec3(0.0f);
+
+            // Accumulate lighting from all sources
+            glm::vec3 lightDirection;
+            for (size_t lightIdx = 0; lightIdx < m_config.numLights; lightIdx++) {
+                const PointLight &light =   *(m_config.sceneLights[lightIdx]);
+                lightDirection          =   samplePos - light.pos;
+                finalColor              +=  computeShading(TFVal, localGradient, lightDirection, viewDirection, light.val, light.val, light.val);
+            }
+
+            // Add camera light if enabled
+            if (m_config.includeCameraLight) { finalColor += computeShading(TFVal, localGradient, viewDirection, viewDirection); }
+
+            // Clamp and return
+            finalColor  = glm::clamp(finalColor, glm::vec3(0.0f), glm::vec3(1.0f));
+            TFVal       = glm::vec4(finalColor, 1.0f);
+        }
 
         // Create the R*A, B*A, G*A, A vector
         TFVal = retAlpha * TFVal;
@@ -395,5 +517,24 @@ void Renderer::fillColor(int x, int y, const glm::vec4& color)
 {
     const size_t index = static_cast<size_t>(m_config.renderResolution.x * y + x);
     m_frameBuffer[index] = color;
+}
+
+std::optional<std::reference_wrapper<const glm::vec4>> Renderer::getColor(const std::vector<glm::vec4> &oldFrameBuffer,
+                                                                          int x, int y,
+                                                                          OutOfBoundsStrategy strat) {
+    // Dealing with out of bounds
+    if ((x < 0 || x >= m_config.renderResolution.x) || (y < 0 || y >= m_config.renderResolution.y)) {
+        switch (strat) {
+            case (ZERO):
+                return std::nullopt;
+            case (NEAREST_NEIGHBOUR):
+                x = std::clamp(0, x, m_config.renderResolution.x - 1);
+                y = std::clamp(0, y, m_config.renderResolution.y - 1);
+                break;
+        }
+    }
+
+    const size_t index = static_cast<size_t>(m_config.renderResolution.x * y + x);
+    return oldFrameBuffer[index];
 }
 }

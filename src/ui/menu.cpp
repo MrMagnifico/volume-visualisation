@@ -6,6 +6,7 @@
 #include <iostream>
 #include <nfd.h>
 #include <string>
+#include <glm/gtc/type_ptr.hpp>
 
 namespace ui {
 
@@ -54,11 +55,13 @@ void Menu::setBaseRenderResolution(const glm::ivec2& baseRenderResolution)
 //  and set the menu volume information
 void Menu::setLoadedVolume(const volume::Volume& volume, const volume::GradientVolume& gradientVolume)
 {
-    m_tfWidget = TransferFunctionWidget(volume);
-    m_tf2DWidget = TransferFunction2DWidget(volume, gradientVolume);
+    m_tfWidget      = TransferFunctionWidget(volume);
+    m_tf2DWidget    = TransferFunction2DWidget(volume, gradientVolume);
+    m_leWidget      = LightEditorWidget(volume);
 
     m_tfWidget->updateRenderConfig(m_renderConfig);
     m_tf2DWidget->updateRenderConfig(m_renderConfig);
+    m_leWidget->updateRenderConfig(m_renderConfig);
 
     const glm::ivec3 dim = volume.dims();
     m_volumeInfo = fmt::format("Volume info:\n{}\nDimensions: ({}, {}, {})\nVoxel value range: {} - {}\n",
@@ -84,6 +87,7 @@ void Menu::drawMenu(const glm::ivec2& pos, const glm::ivec2& size, std::chrono::
         showRayCastTab(renderTime);
         showTransFuncTab();
         show2DTransFuncTab();
+        showLightEditorTab();
 
         if (m_renderConfig != renderConfigBefore)
             callRenderConfigChangedCallback();
@@ -122,6 +126,28 @@ void Menu::showLoadVolTab()
     if (m_volumeLoaded) {ImGui::Text("%s", m_volumeInfo.c_str());}
 }
 
+void Menu::showIsoOptions() {
+    ImGui::Text("Iso shading parameters");
+    ImGui::ColorEdit3("Iso Colour", glm::value_ptr(m_renderConfig.isoColor));
+    ImGui::DragFloat("Iso Value", &m_renderConfig.isoValue, 0.1f, 0.0f, float(m_volumeMax));
+}
+
+void Menu::showEdgeDetectionOptions() {
+    ImGui::Text("Edge detection");
+    ImGui::Checkbox("Enable", &m_renderConfig.edgeDetection);
+    if (m_renderConfig.edgeDetection) { ImGui::SliderFloat("Threshold", &m_renderConfig.edgeThreshold, 0.0f, 6.0f); }
+    if (m_renderConfig.edgeDetection) { ImGui::ColorEdit4("Edge color", glm::value_ptr(m_renderConfig.edgeColor)); }
+}
+
+// This renders the options for configuring Gooch shading
+void Menu::showGoochOptions() {
+    ImGui::Text("Gooch shading coefficients");
+    ImGui::SliderFloat("kBlue",             &m_renderConfig.blueCoeff,                      0.0f, 1.0f);
+    ImGui::SliderFloat("kYellow",           &m_renderConfig.yellowCoeff,                    0.0f, 1.0f);
+    ImGui::SliderFloat("Cool Diffuse",      &m_renderConfig.coolDiffuseCoeff,               0.0f, 1.0f);
+    ImGui::SliderFloat("Warm Diffuse",      &m_renderConfig.warmDiffuseCoeff,               0.0f, 1.0f);
+}
+
 // This renders the RayCast tab, where the user can set the render mode, interpolation mode and other
 //  render-related settings
 void Menu::showRayCastTab(std::chrono::duration<double> renderTime)
@@ -142,13 +168,25 @@ void Menu::showRayCastTab(std::chrono::duration<double> renderTime)
 
         ImGui::NewLine();
 
-        ImGui::Checkbox("Volume Shading", &m_renderConfig.volumeShading);
+        if (m_renderConfig.renderMode == render::RenderMode::RenderIso) { showIsoOptions(); }
 
         ImGui::NewLine();
+        ImGui::Separator();
 
-        ImGui::DragFloat("Iso Value", &m_renderConfig.isoValue, 0.1f, 0.0f, float(m_volumeMax));
+        int* pShadingModeInt = reinterpret_cast<int*>(&m_renderConfig.shadingMode);
+        ImGui::Text("Shading:");
+        ImGui::RadioButton("None", pShadingModeInt, int(render::ShadingMode::ShadingNone));
+        ImGui::RadioButton("Phong", pShadingModeInt, int(render::ShadingMode::ShadingPhong));
+        ImGui::RadioButton("Gooch", pShadingModeInt, int(render::ShadingMode::ShadingGooch));
+        if (m_renderConfig.shadingMode == render::ShadingMode::ShadingGooch) { showGoochOptions(); }
 
         ImGui::NewLine();
+        ImGui::Separator();
+
+        showEdgeDetectionOptions();
+
+        ImGui::NewLine();
+        ImGui::Separator();
 
         ImGui::DragFloat("Resolution scale", &m_resolutionScale, 0.0025f, 0.25f, 2.0f);
         m_renderConfig.renderResolution = glm::ivec2(glm::vec2(m_baseRenderResolution) * m_resolutionScale);
@@ -181,6 +219,15 @@ void Menu::show2DTransFuncTab()
     if (ImGui::BeginTabItem("2D transfer function")) {
         m_tf2DWidget->draw();
         m_tf2DWidget->updateRenderConfig(m_renderConfig);
+        ImGui::EndTabItem();
+    }
+}
+
+// This renders the Lights Editor Widget
+void Menu::showLightEditorTab() {
+    if (ImGui::BeginTabItem("Lights")) {
+        m_leWidget->draw();
+        m_leWidget->updateRenderConfig(m_renderConfig);
         ImGui::EndTabItem();
     }
 }

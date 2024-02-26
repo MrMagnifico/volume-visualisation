@@ -1,5 +1,6 @@
 #pragma once
 #include "render/render_config.h"
+#include "ui/lights_editor.h"
 #include "ui/transfer_func.h"
 #include "ui/transfer_func_2d.h"
 #include "volume/gradient_volume.h"
@@ -37,9 +38,13 @@ public:
 
 private:
     void showLoadVolTab();
+    void showIsoOptions();
+    void showEdgeDetectionOptions();
+    void showGoochOptions();
     void showRayCastTab(std::chrono::duration<double> renderTime);
     void showTransFuncTab();
     void show2DTransFuncTab();
+    void showLightEditorTab();
 
     void callRenderConfigChangedCallback() const;
     void callInterpolationModeChangedCallback() const;
@@ -51,6 +56,7 @@ private:
 
     std::optional<TransferFunctionWidget> m_tfWidget;
     std::optional<TransferFunction2DWidget> m_tf2DWidget;
+    std::optional<LightEditorWidget> m_leWidget;
 
     glm::ivec2 m_baseRenderResolution;
     float m_resolutionScale { 1.0f };
